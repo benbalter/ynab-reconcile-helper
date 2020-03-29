@@ -1,31 +1,32 @@
+# frozen_string_literal: true
+
 # Directions
 # Download ynab data and Capital One Data
 # run dos2unix on capital one data
 # set file locations and earliest date
 # run the file and check unmatched transactions
 
-require "pry"
-require "pry-byebug"
-require "csv"
-require "active_support/core_ext"
+require 'pry'
+require 'pry-byebug'
+require 'csv'
+require 'active_support/core_ext'
 
-ynab_data_file = "data/ynab_register.csv"
-# capital_one_data_file = "data/capital_one_0901-1124.csv"
-chase_data_file = "data/Chase5185_Activity20191101_20191217_20191217.csv"
+ynab_data_file = 'data/ynab.csv'
+boa_data_file = 'data/stmt.csv'
 
 class Reconciler
-  EARLIEST_DATE = Date.new(2019, 9, 1)
+  EARLIEST_DATE = Date.new(2019, 11, 26)
 
   attr_accessor :ynab_data,
-    :bank_data,
-    :matches,
-    :ynab_multimatched,
-    :ynab_unmatched,
-    :bank_unmatched
+                :bank_data,
+                :matches,
+                :ynab_multimatched,
+                :ynab_unmatched,
+                :bank_unmatched
 
   def initialize(ynab_data_file, bank_data_file)
     # @bank_data = load_capital_one_data(bank_data_file)
-    @bank_data = load_chase_data(bank_data_file)
+    @bank_data = load_boa_data(bank_data_file)
     @ynab_data = load_ynab_data(ynab_data_file)
     @matches = {}
     @ynab_multimatched = []
@@ -35,20 +36,19 @@ class Reconciler
 
   def load_ynab_data(ynab_data_file)
     data = CSV.foreach(ynab_data_file, headers: true, header_converters: :symbol)
-      .select { |row| row[:account] == "Unlimited Visa" }
-      .map { |row|
-        row.to_hash.except(:flag, :category_groupcategory).tap do |h|
-          h[:inflow] = str_to_float(row[:inflow])
-          h[:outflow] = str_to_float(row[:outflow])
-          h[:amount] = if h[:inflow] == 0
-            h[:outflow] * -1
-          else
-            h[:inflow]
-          end
-          h[:date] = Date.parse(h[:date])
-        end
-      }
-      .reject { |h| h[:date] < EARLIEST_DATE || h[:cleared] == "Uncleared" }
+              .map do |row|
+             row.to_hash.except(:flag, :category_group, :memo, :category, :category_groupcategory, :account, :cleared).tap do |h|
+               h[:inflow] = str_to_float(row[:inflow])
+               h[:outflow] = str_to_float(row[:outflow])
+               h[:amount] = if h[:inflow] == 0
+                              h[:outflow] * -1
+                            else
+                              h[:inflow]
+               end
+               h[:date] = Date.strptime(h[:date], '%m/%d/%y')
+             end
+           end
+              .reject { |h| h[:date] < EARLIEST_DATE || h[:cleared] == 'Uncleared' }
 
     ynab_combine_splits(data)
   end
@@ -59,16 +59,16 @@ class Reconciler
     split_curr = 0
     split_size = 0
     data.each do |h|
-      if h[:memo].start_with? "Split"
+      if h[:memo].to_s.start_with? 'Split'
         num, size = parse_split_str(h[:memo])
         if current_split.nil?
           split_curr = num
           split_size = size
           current_split = h
         else
-          unless split_size == size && split_curr+1 == num
+          unless split_size == size && split_curr + 1 == num
             binding.pry
-            raise "Invalid split!"
+            raise 'Invalid split!'
           end
           split_curr = num
           current_split[:amount] += h[:amount]
@@ -98,31 +98,41 @@ class Reconciler
 
   def load_capital_one_data(capital_one_data_file)
     CSV.foreach(capital_one_data_file, headers: true, header_converters: :symbol)
-      .map do |row|
-        row.to_hash.except(:account_number, :balance, :transaction_amount, :transaction_date).tap do |h|
-          h[:amount] = row[:transaction_amount].to_f
-          d = row[:transaction_date].split("/").map(&:to_i)
-          h[:date] = Date.new(d[2] + 2000, d[0], d[1])
-        end
+       .map do |row|
+      row.to_hash.except(:account_number, :balance, :transaction_amount, :transaction_date).tap do |h|
+        h[:amount] = row[:transaction_amount].to_f
+        d = row[:transaction_date].split('/').map(&:to_i)
+        h[:date] = Date.new(d[2] + 2000, d[0], d[1])
       end
+    end
   end
 
   def load_chase_data(chase_data_file)
     CSV.foreach(chase_data_file, headers: true, header_converters: :symbol)
-      .map do |row|
-        row.to_hash.except(:amount, :transaction_date, :category, :post_date).tap do |h|
-          h[:amount] = row[:amount].to_f
-          d = row[:transaction_date].split("/").map(&:to_i)
-          h[:date] = Date.new(d[2], d[0], d[1])
-        end
+       .map do |row|
+      row.to_hash.except(:amount, :transaction_date, :category, :post_date).tap do |h|
+        h[:amount] = row[:amount].to_f
+        d = row[:transaction_date].split('/').map(&:to_i)
+        h[:date] = Date.new(d[2], d[0], d[1])
       end
+    end
+  end
+
+  def load_boa_data(boa_data_file)
+    CSV.foreach(boa_data_file, headers: true, header_converters: :symbol)
+       .map do |row|
+      row.to_hash.except(:running_bal).tap do |h|
+        h[:amount] = h[:amount].to_f
+        h[:date] = Date.strptime(h[:date], '%m/%d/%y')
+      end
+    end
   end
 
   def str_to_float(str)
     str[1..-1].to_f
   end
 
-  def run_matches(&block)
+  def run_matches
     ynab_multimatched.clear
     ynab_unmatched.each do |y|
       potential = bank_unmatched.select { |c| yield(y, c) }
@@ -155,16 +165,15 @@ class Reconciler
   end
 
   def run_n_day_matches(n)
-
     run_matches { |y, c| n_day_match?(n, y, c) }
   end
 
   def toss_reconciled
-    @ynab_unmatched.reject! { |h| h[:cleared] == "Reconciled" }
+    @ynab_unmatched.reject! { |h| h[:cleared] == 'Reconciled' }
   end
 end
 
-reconciler = Reconciler.new(ynab_data_file, chase_data_file)
+reconciler = Reconciler.new(ynab_data_file, boa_data_file)
 
 def summary(i, reconciler)
   puts <<~STR
@@ -177,7 +186,7 @@ def summary(i, reconciler)
 end
 
 summary(0, reconciler)
-10.times do |i|
+7.times do |i|
   reconciler.run_n_day_matches(i)
   summary(i, reconciler)
 end
